@@ -11,9 +11,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Table,
-    Text,
     UniqueConstraint,
     and_,
     case,
@@ -129,8 +129,8 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
             Column("input_tokens", Integer, nullable=False, server_default="0"),
             Column("output_tokens", Integer, nullable=False, server_default="0"),
             Column("total_tokens", Integer, nullable=False, server_default="0"),
-            Column("input_tokens_details", Text),
-            Column("output_tokens_details", Text),
+            Column("input_tokens_details", JSON),
+            Column("output_tokens_details", JSON),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
@@ -1113,8 +1113,8 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
                     "input_tokens": int(row[1] or 0),
                     "output_tokens": int(row[2] or 0),
                     "total_tokens": int(row[3] or 0),
-                    "input_tokens_details": self._loads_optional(row[4]),
-                    "output_tokens_details": self._loads_optional(row[5]),
+                    "input_tokens_details": row[4],  # Already a dict from JSON column
+                    "output_tokens_details": row[5],  # Already a dict from JSON column
                 }
 
             stmt = (
@@ -1155,8 +1155,8 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
                     "input_tokens": int(input_tokens or 0),
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),
-                    "input_tokens_details": self._loads_optional(input_details),
-                    "output_tokens_details": self._loads_optional(output_details),
+                    "input_tokens_details": input_details,
+                    "output_tokens_details": output_details,
                 }
             )
         return usage_rows
@@ -1173,8 +1173,8 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
             usage_data: The usage data to store.
         """
         await self._ensure_tables()
-        input_details = self._dumps_token_details(getattr(usage_data, "input_tokens_details", None))
-        output_details = self._dumps_token_details(
+        input_details = self._serialize_token_details(getattr(usage_data, "input_tokens_details", None))
+        output_details = self._serialize_token_details(
             getattr(usage_data, "output_tokens_details", None)
         )
 
@@ -1211,29 +1211,29 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
                     )
                     await sess.execute(insert_stmt)
 
-    def _dumps_token_details(self, details: Any) -> str | None:
-        """Serialize token detail objects to JSON."""
+    def _serialize_token_details(self, details: Any) -> dict[str, Any] | None:
+        """Serialize token detail objects to dict for JSON column storage.
+        
+        Args:
+            details: Token details object to serialize.
+            
+        Returns:
+            Dictionary representation suitable for JSON column, or None.
+        """
         if not details:
             return None
 
+        # Try Pydantic v2 model_dump first, then v1 dict, then fallback to __dict__
         for attr in ("model_dump", "dict"):
             if hasattr(details, attr):
                 try:
-                    return json.dumps(getattr(details, attr)())
+                    return getattr(details, attr)()
                 except (TypeError, ValueError):
                     continue
 
+        # Fallback to __dict__ for plain objects
         try:
-            return json.dumps(details.__dict__)
-        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            return details.__dict__
+        except (TypeError, ValueError, AttributeError) as exc:  # pragma: no cover - defensive
             self._logger.warning("Failed to serialize token details: %s", exc)
-            return None
-
-    def _loads_optional(self, payload: str | None) -> Any:
-        """Deserialize optional JSON payloads."""
-        if not payload:
-            return None
-        try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
             return None

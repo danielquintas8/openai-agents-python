@@ -810,3 +810,94 @@ async def test_tool_execution_integration(agent: Agent):
 
         tool_usage = await session.get_tool_usage()
         assert len(tool_usage) > 0
+
+
+async def test_json_column_type_validation():
+    async with managed_session("type_validation_test") as session:
+        # Create usage with token details
+        usage = Usage(
+            requests=1,
+            input_tokens=50,
+            output_tokens=30,
+            total_tokens=80,
+            input_tokens_details=InputTokensDetails(cached_tokens=10, audio_tokens=5),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=15),
+        )
+
+        await session.add_items([{"role": "user", "content": "Type validation test"}])
+        result = create_mock_run_result(usage)
+        await session.store_run_usage(result)
+
+        # Retrieve and validate types
+        turn_usage = await session.get_turn_usage(1)
+
+        # CRITICAL TYPE CHECKS
+        assert isinstance(turn_usage, dict), "turn_usage should be dict"
+
+        # Verify token details are dicts, NOT strings
+        input_details = turn_usage["input_tokens_details"]
+        output_details = turn_usage["output_tokens_details"]
+
+        assert isinstance(input_details, dict), \
+            f"Expected input_tokens_details to be dict, got {type(input_details)}: {input_details}"
+        assert isinstance(output_details, dict), \
+            f"Expected output_tokens_details to be dict, got {type(output_details)}: {output_details}"
+
+        # Verify NOT strings (would indicate JSON wasn't deserialized)
+        assert not isinstance(input_details, str), \
+            "input_tokens_details should not be a JSON string"
+        assert not isinstance(output_details, str), \
+            "output_tokens_details should not be a JSON string"
+
+        # Verify actual values
+        assert input_details["cached_tokens"] == 10
+        assert input_details["audio_tokens"] == 5
+        assert output_details["reasoning_tokens"] == 15
+
+        # Direct database inspection
+        async with session._session_factory() as sess:
+            from sqlalchemy import and_, select
+
+            stmt = select(
+                session._turn_usage.c.input_tokens_details,
+                session._turn_usage.c.output_tokens_details,
+            ).where(
+                and_(
+                    session._turn_usage.c.session_id == session.session_id,
+                    session._turn_usage.c.user_turn_number == 1,
+                )
+            )
+            db_result = await sess.execute(stmt)
+            row = db_result.first()
+
+            # Verify database returns dicts (JSON column behavior)
+            assert isinstance(row[0], dict), \
+                f"Database should return dict from JSON column, got {type(row[0])}"
+            assert isinstance(row[1], dict), \
+                f"Database should return dict from JSON column, got {type(row[1])}"
+
+            # Verify content matches
+            assert row[0]["cached_tokens"] == 10
+            assert row[1]["reasoning_tokens"] == 15
+
+
+async def test_none_and_empty_token_details():
+    async with managed_session("none_token_details_test") as session:
+        # Test 1: Usage with no token details attributes
+        minimal_usage = Usage(
+            requests=1,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+
+        await session.add_items([{"role": "user", "content": "Minimal usage test"}])
+        await session.store_run_usage(create_mock_run_result(minimal_usage))
+
+        turn_usage = await session.get_turn_usage(1)
+
+        # Validate it's either None or a dict with defaults
+        if turn_usage["input_tokens_details"] is not None:
+            assert isinstance(turn_usage["input_tokens_details"], dict)
+        if turn_usage["output_tokens_details"] is not None:
+            assert isinstance(turn_usage["output_tokens_details"], dict)
