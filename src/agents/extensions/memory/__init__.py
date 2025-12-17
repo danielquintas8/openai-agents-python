@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .advanced_sqlite_session import AdvancedSQLiteSession
+    from .advanced_sqlalchemy_session import AdvancedSQLAlchemySession
     from .dapr_session import (
         DAPR_CONSISTENCY_EVENTUAL,
         DAPR_CONSISTENCY_STRONG,
