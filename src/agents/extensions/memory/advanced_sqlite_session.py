@@ -46,8 +46,45 @@ class AdvancedSQLiteSession(SQLiteSession):
         )
         if create_tables:
             self._init_structure_tables()
-        self._current_branch_id = "main"
+
+        if session_settings and session_settings.branch_id:
+            self._current_branch_id = session_settings.branch_id
+            # Validate branch exists for existing sessions (not creating new tables)
+            if not create_tables and session_settings.branch_id != "main":
+                self._validate_branch_exists(session_settings.branch_id)
+        else:
+            self._current_branch_id = "main"
+
         self._logger = logger or logging.getLogger(__name__)
+
+    @property
+    def current_branch_id(self) -> str:
+        """Get the current branch ID."""
+        return self._current_branch_id
+
+    def _validate_branch_exists(self, branch_id: str) -> None:
+        """Validate that a branch exists in the database.
+
+        Args:
+            branch_id: The branch ID to validate.
+
+        Raises:
+            ValueError: If the branch doesn't exist.
+        """
+        conn = self._get_connection()
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM message_structure
+                WHERE session_id = ? AND branch_id = ?
+            """,
+                (self.session_id, branch_id),
+            )
+            count = cursor.fetchone()[0]
+            if count == 0:
+                raise ValueError(
+                    f"Branch '{branch_id}' does not exist for session '{self.session_id}'"
+                )
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
@@ -647,25 +684,8 @@ class AdvancedSQLiteSession(SQLiteSession):
         Raises:
             ValueError: If the branch doesn't exist.
         """
-
         # Validate branch exists
-        def _validate_branch():
-            """Synchronous helper to validate branch exists."""
-            conn = self._get_connection()
-            with closing(conn.cursor()) as cursor:
-                cursor.execute(
-                    """
-                    SELECT COUNT(*) FROM message_structure
-                    WHERE session_id = ? AND branch_id = ?
-                """,
-                    (self.session_id, branch_id),
-                )
-
-                count = cursor.fetchone()[0]
-                if count == 0:
-                    raise ValueError(f"Branch '{branch_id}' does not exist")
-
-        await asyncio.to_thread(_validate_branch)
+        self._validate_branch_exists(branch_id)
 
         old_branch = self._current_branch_id
         self._current_branch_id = branch_id

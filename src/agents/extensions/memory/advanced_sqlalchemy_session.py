@@ -30,8 +30,8 @@ from agents.result import RunResult
 from agents.usage import Usage
 
 from ...items import TResponseInputItem
-from .sqlalchemy_session import SQLAlchemySession
-
+from ...memory import SQLAlchemySession
+from ...memory.session_settings import SessionSettings
 
 class AdvancedSQLAlchemySession(SQLAlchemySession):
     """SQLAlchemy implementation of the advanced session with branching and usage tracking."""
@@ -50,6 +50,7 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
         structure_table: str = "message_structure",
         turn_usage_table: str = "turn_usage",
         logger: logging.Logger | None = None,
+        session_settings: SessionSettings | None = None,
     ):
         """Initialize the AdvancedSQLAlchemySession."""
         super().__init__(
@@ -58,6 +59,7 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
             create_tables=create_tables,
             sessions_table=sessions_table,
             messages_table=messages_table,
+            session_settings=session_settings,
         )
 
         self._message_structure = Table(
@@ -152,8 +154,46 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
             self._turn_usage.c.user_turn_number,
         )
 
-        self._current_branch_id = "main"
+        if session_settings and session_settings.branch_id:
+            self._current_branch_id = session_settings.branch_id
+        else:
+            self._current_branch_id = "main"
+
         self._logger = logger or logging.getLogger(__name__)
+
+    @property
+    def current_branch_id(self) -> str:
+        """Get the current branch ID."""
+        return self._current_branch_id
+
+    async def _validate_branch_exists(self, branch_id: str) -> None:
+        """Validate that a branch exists in the database.
+
+        Args:
+            branch_id: The branch ID to validate.
+
+        Raises:
+            ValueError: If the branch doesn't exist.
+        """
+        await self._ensure_tables()
+
+        async with self._session_factory() as sess:
+            stmt = (
+                select(func.count())
+                .select_from(self._message_structure)
+                .where(
+                    and_(
+                        self._message_structure.c.session_id == self.session_id,
+                        self._message_structure.c.branch_id == branch_id,
+                    )
+                )
+            )
+            count = await sess.scalar(stmt)
+
+        if not count:
+            raise ValueError(
+                f"Branch '{branch_id}' does not exist for session '{self.session_id}'"
+            )
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add items to the session.
@@ -603,22 +643,8 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
         Raises:
             ValueError: If the branch doesn't exist.
         """
-        await self._ensure_tables()
-        async with self._session_factory() as sess:
-            stmt = (
-                select(func.count())
-                .select_from(self._message_structure)
-                .where(
-                    and_(
-                        self._message_structure.c.session_id == self.session_id,
-                        self._message_structure.c.branch_id == branch_id,
-                    )
-                )
-            )
-            exists = await sess.scalar(stmt)
-
-        if not exists:
-            raise ValueError(f"Branch '{branch_id}' does not exist")
+        # Validate branch exists
+        await self._validate_branch_exists(branch_id)
 
         old_branch = self._current_branch_id
         self._current_branch_id = branch_id
