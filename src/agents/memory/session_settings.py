@@ -21,6 +21,9 @@ class SessionSettings:
     limit: int | None = None
     """Maximum number of items to retrieve. If None, retrieves all items."""
 
+    branch_id: str | None = None
+    """Branch ID to use for session operations."""
+
     def resolve(self, override: SessionSettings | None) -> SessionSettings:
         """Produce a new SessionSettings by overlaying any non-None values from the
         override on top of this instance."""
