@@ -901,3 +901,235 @@ async def test_none_and_empty_token_details():
             assert isinstance(turn_usage["input_tokens_details"], dict)
         if turn_usage["output_tokens_details"] is not None:
             assert isinstance(turn_usage["output_tokens_details"], dict)
+
+
+# ============================================================================
+# SessionSettings Tests
+# ============================================================================
+
+
+async def test_session_settings_default():
+    """Test that session_settings defaults to empty SessionSettings."""
+    from agents.memory import SessionSettings
+
+    async with managed_session("default_settings_test") as session:
+        assert isinstance(session.session_settings, SessionSettings)
+        assert session.session_settings.limit is None
+
+
+async def test_session_settings_constructor():
+    """Test passing session_settings via constructor."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "constructor_settings_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(limit=5),
+    )
+    try:
+        assert session.session_settings.limit == 5
+    finally:
+        await session._engine.dispose()
+
+
+async def test_get_items_uses_session_settings_limit():
+    """Test that get_items uses session_settings.limit as default."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "uses_settings_limit_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(limit=3),
+    )
+    try:
+        # Add 5 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(5)
+        ]
+        await session.add_items(items)
+
+        # get_items() with no limit should use session_settings.limit=3
+        retrieved = await session.get_items()
+        assert len(retrieved) == 3
+        # Should get the last 3 items
+        assert retrieved[0].get("content") == "Message 2"
+        assert retrieved[1].get("content") == "Message 3"
+        assert retrieved[2].get("content") == "Message 4"
+    finally:
+        await session._engine.dispose()
+
+
+async def test_get_items_explicit_limit_overrides_session_settings():
+    """Test that explicit limit parameter overrides session_settings."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "explicit_override_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(limit=5),
+    )
+    try:
+        # Add 10 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        # Explicit limit=2 should override session_settings.limit=5
+        retrieved = await session.get_items(limit=2)
+        assert len(retrieved) == 2
+        assert retrieved[0].get("content") == "Message 8"
+        assert retrieved[1].get("content") == "Message 9"
+    finally:
+        await session._engine.dispose()
+
+
+async def test_session_settings_resolve():
+    """Test SessionSettings.resolve() method."""
+    from agents.memory import SessionSettings
+
+    base = SessionSettings(limit=100)
+    override = SessionSettings(limit=50)
+
+    final = base.resolve(override)
+
+    assert final.limit == 50  # Override wins
+    assert base.limit == 100  # Original unchanged
+
+    # Resolving with None returns self
+    final_none = base.resolve(None)
+    assert final_none.limit == 100
+
+
+async def test_runner_with_session_settings_override(agent: Agent):
+    """Test that RunConfig can override session's default settings."""
+    from agents import RunConfig
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "runner_override_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(limit=100),
+    )
+    try:
+        # Add some history
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Turn {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        # Use RunConfig to override limit to 2
+        assert isinstance(agent.model, FakeModel)
+        agent.model.set_next_output([get_text_message("Got it")])
+
+        await Runner.run(
+            agent,
+            "New question",
+            session=session,
+            run_config=RunConfig(
+                session_settings=SessionSettings(limit=2)  # Override to 2
+            ),
+        )
+
+        # Verify the agent received only the last 2 history items + new question
+        last_input = agent.model.last_turn_args["input"]
+        # Filter out the new "New question" input
+        history_items = [item for item in last_input if item.get("content") != "New question"]
+        # Should have 2 history items (last two from the 10 we added)
+        assert len(history_items) == 2
+    finally:
+        await session._engine.dispose()
+
+
+# ============================================================================
+# Branch ID Tests
+# ============================================================================
+
+
+async def test_session_settings_branch_id_init():
+    """Test initializing session with branch_id from session_settings."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "branch_id_init_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="custom_branch"),
+    )
+    try:
+        # Should use the branch_id from session_settings
+        assert session.current_branch_id == "custom_branch"
+    finally:
+        await session._engine.dispose()
+
+
+async def test_session_settings_branch_id_creates_implicitly():
+    """Test that a non-existent branch is created implicitly on first add_items."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "implicit_branch_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="new_branch"),
+    )
+    try:
+        # Branch doesn't exist yet, but we're on it
+        assert session.current_branch_id == "new_branch"
+
+        # Add items - this should create the branch implicitly
+        await session.add_items([{"role": "user", "content": "First message on new branch"}])
+
+        # Verify items are on the new branch
+        items = await session.get_items()
+        assert len(items) == 1
+        assert items[0].get("content") == "First message on new branch"
+
+        # Verify branch now exists in list
+        branches = await session.list_branches()
+        branch_ids = [b["branch_id"] for b in branches]
+        assert "new_branch" in branch_ids
+    finally:
+        await session._engine.dispose()
+
+
+async def test_session_settings_branch_id_with_limit():
+    """Test session_settings with both branch_id and limit."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLAlchemySession.from_url(
+        "branch_and_limit_test",
+        url=DB_URL,
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="limited_branch", limit=2),
+    )
+    try:
+        assert session.current_branch_id == "limited_branch"
+        assert session.session_settings.limit == 2
+
+        # Add multiple items
+        await session.add_items([
+            {"role": "user", "content": "Message 1"},
+            {"role": "user", "content": "Message 2"},
+            {"role": "user", "content": "Message 3"},
+            {"role": "user", "content": "Message 4"},
+        ])
+
+        # get_items() should return only last 2 due to limit
+        items = await session.get_items()
+        assert len(items) == 2
+        assert items[0].get("content") == "Message 3"
+        assert items[1].get("content") == "Message 4"
+    finally:
+        await session._engine.dispose()
+
+
+async def test_switch_to_nonexistent_branch_fails():
+    """Test that switching to a non-existent branch raises ValueError."""
+    async with managed_session("switch_error_test") as session:
+        with pytest.raises(ValueError, match="Branch 'nonexistent' does not exist"):
+            await session.switch_to_branch("nonexistent")

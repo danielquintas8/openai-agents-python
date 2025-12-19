@@ -1127,3 +1127,94 @@ async def test_runner_with_session_settings_override(agent: Agent):
     assert len(history_items) == 2
 
     session.close()
+
+
+# ============================================================================
+# Branch ID Tests
+# ============================================================================
+
+
+async def test_session_settings_branch_id_init():
+    """Test initializing session with branch_id from session_settings."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLiteSession(
+        session_id="branch_id_init_test",
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="custom_branch"),
+    )
+
+    # Should use the branch_id from session_settings
+    assert session.current_branch_id == "custom_branch"
+
+    session.close()
+
+
+async def test_session_settings_branch_id_creates_implicitly():
+    """Test that a non-existent branch is created implicitly on first add_items."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLiteSession(
+        session_id="implicit_branch_test",
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="new_branch"),
+    )
+
+    # Branch doesn't exist yet, but we're on it
+    assert session.current_branch_id == "new_branch"
+
+    # Add items - this should create the branch implicitly
+    await session.add_items([{"role": "user", "content": "First message on new branch"}])
+
+    # Verify items are on the new branch
+    items = await session.get_items()
+    assert len(items) == 1
+    assert items[0].get("content") == "First message on new branch"
+
+    # Verify branch now exists in list
+    branches = await session.list_branches()
+    branch_ids = [b["branch_id"] for b in branches]
+    assert "new_branch" in branch_ids
+
+    session.close()
+
+
+async def test_session_settings_branch_id_with_limit():
+    """Test session_settings with both branch_id and limit."""
+    from agents.memory import SessionSettings
+
+    session = AdvancedSQLiteSession(
+        session_id="branch_and_limit_test",
+        create_tables=True,
+        session_settings=SessionSettings(branch_id="limited_branch", limit=2),
+    )
+
+    assert session.current_branch_id == "limited_branch"
+    assert session.session_settings.limit == 2
+
+    # Add multiple items
+    await session.add_items([
+        {"role": "user", "content": "Message 1"},
+        {"role": "user", "content": "Message 2"},
+        {"role": "user", "content": "Message 3"},
+        {"role": "user", "content": "Message 4"},
+    ])
+
+    # get_items() should return only last 2 due to limit
+    items = await session.get_items()
+    assert len(items) == 2
+    assert items[0].get("content") == "Message 3"
+    assert items[1].get("content") == "Message 4"
+
+    session.close()
+
+
+async def test_switch_to_nonexistent_branch_fails():
+    """Test that switching to a non-existent branch raises ValueError."""
+    session = AdvancedSQLiteSession(session_id="switch_error_test", create_tables=True)
+
+    with pytest.raises(ValueError, match="Branch 'nonexistent' does not exist"):
+        await session.switch_to_branch("nonexistent")
+
+    session.close()
+

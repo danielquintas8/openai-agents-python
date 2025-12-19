@@ -30,8 +30,8 @@ from agents.result import RunResult
 from agents.usage import Usage
 
 from ...items import TResponseInputItem
-from ...memory import SQLAlchemySession
 from ...memory.session_settings import SessionSettings
+from .sqlalchemy_session import SQLAlchemySession
 
 class AdvancedSQLAlchemySession(SQLAlchemySession):
     """SQLAlchemy implementation of the advanced session with branching and usage tracking."""
@@ -238,11 +238,14 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
         Returns:
             List of conversation items from the specified branch.
         """
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
+
         branch = branch_id or self._current_branch_id
         await self._ensure_tables()
 
         async with self._session_factory() as sess:
-            if limit is None:
+            if session_limit is None:
                 stmt = (
                     select(self._messages.c.message_data)
                     .join(
@@ -267,13 +270,13 @@ class AdvancedSQLAlchemySession(SQLAlchemySession):
                     )
                     .where(self._messages.c.session_id == self.session_id)
                     .order_by(self._message_structure.c.sequence_number.desc())
-                    .limit(limit)
+                    .limit(session_limit)
                 )
 
             result = await sess.execute(stmt)
             rows: list[str] = [row[0] for row in result.all()]
 
-        if limit is not None:
+        if session_limit is not None:
             rows.reverse()
 
         items: list[TResponseInputItem] = []
