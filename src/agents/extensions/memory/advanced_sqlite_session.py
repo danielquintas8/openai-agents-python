@@ -49,9 +49,6 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         if session_settings and session_settings.branch_id:
             self._current_branch_id = session_settings.branch_id
-            # Validate branch exists for existing sessions (not creating new tables)
-            if not create_tables and session_settings.branch_id != "main":
-                self._validate_branch_exists(session_settings.branch_id)
         else:
             self._current_branch_id = "main"
 
